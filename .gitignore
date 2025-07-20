@@ -32,3 +32,8 @@ google-services.json
 
 # Android Profiling
 *.hprof
+
+build
+dist
+*.egg*
+ 885c75a (Subindo projeto Flask com XGBoost)

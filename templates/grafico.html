@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gráfico - {{ jogo }}</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root {
+      --cor-destaque: #00ffff;
+      --fundo-escuro: #111111;
+      --texto-claro: #eeeeee;
+    }
+    
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background: var(--fundo-escuro);
+      color: var(--texto-claro);
+    }
+    
+    header {
+      background: #1a1a1a;
+      padding: 15px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid #333;
+    }
+    
+    h1 {
+      margin: 0;
+      color: var(--cor-destaque);
+      font-size: 1.5rem;
+    }
+    
+    .back-btn {
+      color: var(--cor-destaque);
+      text-decoration: none;
+      font-weight: bold;
+      padding: 8px 15px;
+      border-radius: 5px;
+      transition: background 0.3s;
+    }
+    
+    .back-btn:hover {
+      background: rgba(0, 255, 255, 0.1);
+    }
+    
+    .chart-container {
+      max-width: 900px;
+      margin: 30px auto;
+      padding: 20px;
+    }
+    
+    canvas {
+      width: 100% !important;
+      height: 400px !important;
+      background: #1e1e1e;
+      border-radius: 10px;
+      padding: 20px;
+    }
+    
+    .stats {
+      max-width: 900px;
+      margin: 0 auto 30px;
+      padding: 0 20px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 15px;
+    }
+    
+    .stat-card {
+      background: #1e1e1e;
+      border-radius: 8px;
+      padding: 15px;
+      text-align: center;
+      border: 1px solid #333;
+    }
+    
+    .stat-value {
+      font-size: 1.8rem;
+      font-weight: bold;
+      color: var(--cor-destaque);
+      margin: 10px 0;
+    }
+    
+    footer {
+      background: #000;
+      padding: 20px;
+      text-align: center;
+      margin-top: 50px;
+      font-size: 0.9rem;
+      color: #777;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>📈 {{ jogo }} - Histórico</h1>
+    <a href="/" class="back-btn">← Voltar</a>
+  </header>
+
+  <div class="stats">
+    <div class="stat-card">
+      <div>Último Valor</div>
+      <div class="stat-value">{{ historico[0][1] }}x</div>
+    </div>
+    <div class="stat-card">
+      <div>Média (30 jogos)</div>
+      <div class="stat-value" id="avg-value">0x</div>
+    </div>
+    <div class="stat-card">
+      <div>Maior Valor</div>
+      <div class="stat-value" id="max-value">0x</div>
+    </div>
+    <div class="stat-card">
+      <div>Menor Valor</div>
+      <div class="stat-value" id="min-value">0x</div>
+    </div>
+  </div>
+
+  <div class="chart-container">
+    <canvas id="chart"></canvas>
+  </div>
+
+  <footer>
+    <p>Bot Predictor - ElephantBet © {{ now.year }}</p>
+    <p>Atualizado em: {{ now.strftime('%d/%m/%Y %H:%M') }}</p>
+  </footer>
+
+  <script>
+    // Processar dados do histórico
+    const historico = {{ historico|tojson }};
+    const labels = historico.map(item => item[2].slice(11, 19)); // Extrair apenas a hora
+    const data = historico.map(item => item[1]);
+    
+    // Calcular estatísticas
+    document.getElementById('avg-value').textContent = 
+      (data.reduce((a, b) => a + b, 0) / data.length).toFixed(2) + 'x';
+    document.getElementById('max-value').textContent = 
+      Math.max(...data).toFixed(2) + 'x';
+    document.getElementById('min-value').textContent = 
+      Math.min(...data).toFixed(2) + 'x';
+    
+    // Criar gráfico
+    const ctx = document.getElementById('chart').getContext('2d');
+    new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: labels.reverse(),
+        datasets: [{
+          label: 'Multiplicador',
+          data: data.reverse(),
+          borderColor: '#00ffff',
+          backgroundColor: 'rgba(0, 255, 255, 0.1)',
+          borderWidth: 2,
+          fill: true,
+          tension: 0.4
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: {
+            labels: {
+              color: '#eee',
+              font: {
+                size: 14
+              }
+            }
+          },
+          tooltip: {
+            mode: 'index',
+            intersect: false
+          }
+        },
+        scales: {
+          x: {
+            grid: {
+              color: 'rgba(255, 255, 255, 0.1)'
+            },
+            ticks: {
+              color: '#aaa'
+            }
+          },
+          y: {
+            beginAtZero: true,
+            grid: {
+              color: 'rgba(255, 255, 255, 0.1)'
+            },
+            ticks: {
+              color: '#aaa'
+            }
+          }
+        }
+      }
+    });
+  </script>
+</body>
+</html>

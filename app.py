@@ -1,0 +1,268 @@
+from flask import Flask, jsonify, render_template, request
+from threading import Thread, Lock, Event
+from datetime import datetime
+import numpy as np
+import pandas as pd
+import os
+import time
+import joblib
+import hashlib
+import logging
+from sklearn.preprocessing import StandardScaler
+from xgboost import XGBClassifier
+from scraper import coletar_dados_do_jogo
+import signal
+import sys
+from werkzeug.middleware.proxy_fix import ProxyFix
+
+# Configuração inicial do aplicativo
+app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
+# Configurações globais
+JOGOS = ["aviator", "jetx", "rocketman", "spaceman", "navigator", "fashnator", "swimminator"]
+MODELS_DIR = "models"
+DATA_DIR = "data"
+INTERVALO_COLETA = 60  # segundos
+HISTORICO_MAXIMO = 200
+TAMANHO_JANELA = 5  # Número de pontos usados para previsão
+
+# Configuração avançada de logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('app.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Criar estrutura de pastas
+for directory in [MODELS_DIR, DATA_DIR]:
+    os.makedirs(directory, exist_ok=True)
+
+# Estado global
+modelos = {}
+scalers = {}
+dados_atuais = {jogo: [] for jogo in JOGOS}
+historico = {jogo: [] for jogo in JOGOS}
+locks = {jogo: Lock() for jogo in JOGOS}
+stop_event = Event()
+
+class ModeloPredicao:
+    """Classe para gerenciar modelos de predição para cada jogo"""
+    
+    def __init__(self, jogo):
+        self.jogo = jogo
+        self.model = None
+        self.scaler = None
+        self.carregar_modelo()
+    
+    def carregar_modelo(self):
+        """Carrega modelo existente ou cria um novo"""
+        modelo_path = os.path.join(MODELS_DIR, f"{self.jogo}_model.joblib")
+        scaler_path = os.path.join(MODELS_DIR, f"{self.jogo}_scaler.joblib")
+        
+        try:
+            if os.path.exists(modelo_path) and os.path.exists(scaler_path):
+                self.model = joblib.load(modelo_path)
+                self.scaler = joblib.load(scaler_path)
+                logger.info(f"Modelo {self.jogo} carregado com sucesso")
+                return
+        except Exception as e:
+            logger.error(f"Erro ao carregar modelo {self.jogo}: {e}")
+
+        # Criar novo modelo se não existir ou falhar ao carregar
+        self.model = XGBClassifier(
+            n_estimators=150,
+            max_depth=6,
+            learning_rate=0.1,
+            objective='multi:softprob',
+            eval_metric='mlogloss',
+            use_label_encoder=False
+        )
+        self.scaler = StandardScaler()
+        logger.info(f"Novo modelo criado para {self.jogo}")
+    
+    def salvar_modelo(self):
+        """Salva o modelo e scaler em arquivos"""
+        try:
+            joblib.dump(self.model, os.path.join(MODELS_DIR, f"{self.jogo}_model.joblib"))
+            joblib.dump(self.scaler, os.path.join(MODELS_DIR, f"{self.jogo}_scaler.joblib"))
+        except Exception as e:
+            logger.error(f"Erro ao salvar modelo {self.jogo}: {e}")
+
+def categorizar(valor):
+    """Categoriza o valor em uma classe de previsão"""
+    if valor < 1.5: return 0      # Azul
+    elif valor < 3.0: return 1    # Roxo
+    return 2                      # Rosa
+
+def prever(jogo, lista):
+    """Faz a previsão com base nos dados históricos"""
+    if len(lista) < TAMANHO_JANELA or jogo not in modelos:
+        return "Dados insuficientes", 0.0, 1.0
+    
+    try:
+        entrada = np.array(lista[:TAMANHO_JANELA]).reshape(1, -1)
+        entrada = modelos[jogo].scaler.transform(entrada)
+        
+        pred = modelos[jogo].model.predict(entrada)[0]
+        proba = modelos[jogo].model.predict_proba(entrada)[0][pred]
+        
+        cores = ["AZUL 💙", "ROXO 💜", "ROSA 🌹"]
+        protecao = [1.3, 1.8, 2.5][pred]
+        return cores[pred], round(proba * 100, 2), protecao
+    except Exception as e:
+        logger.error(f"Erro ao fazer previsão para {jogo}: {e}")
+        return "Erro na previsão", 0.0, 1.0
+
+def treinar(jogo, dados, categoria):
+    """Treina o modelo com novos dados"""
+    if len(dados) < TAMANHO_JANELA:
+        return
+    
+    try:
+        entrada = np.array(dados[:TAMANHO_JANELA]).reshape(1, -1)
+        arquivo = os.path.join(DATA_DIR, f"{jogo}.csv")
+        
+        # Adiciona novos dados ao arquivo
+        with open(arquivo, "a") as f:
+            linha = ",".join(map(str, entrada[0])) + f",{categoria}\n"
+            f.write(linha)
+
+        # Treina o modelo se tiver dados suficientes
+        df = pd.read_csv(arquivo, header=None)
+        if len(df) >= 100:
+            X = df.iloc[:, :-1].values
+            y = df.iloc[:, -1].values
+            
+            modelos[jogo].scaler.fit(X)
+            X_scaled = modelos[jogo].scaler.transform(X)
+            
+            modelos[jogo].model.fit(X_scaled, y)
+            modelos[jogo].salvar_modelo()
+            logger.info(f"Modelo {jogo} treinado com {len(df)} amostras")
+    except Exception as e:
+        logger.error(f"Erro ao treinar modelo {jogo}: {e}")
+
+def tarefa_jogo(jogo):
+    """Thread que coleta e processa dados para um jogo específico"""
+    logger.info(f"Iniciando thread de coleta para {jogo}")
+    
+    while not stop_event.is_set():
+        try:
+            inicio = time.time()
+            
+            # Coleta dados do jogo
+            ultimos = coletar_dados_do_jogo(jogo)
+            if not ultimos or len(ultimos) < TAMANHO_JANELA:
+                logger.warning(f"Dados insuficientes para {jogo}")
+                continue
+            
+            # Processa os dados
+            with locks[jogo]:
+                dados_atuais[jogo] = ultimos
+                previsao, confianca, protecao = prever(jogo, ultimos)
+                categoria = categorizar(ultimos[0])
+                treinar(jogo, ultimos[1:], categoria)
+                
+                # Armazena no histórico
+                registro = {
+                    "timestamp": datetime.now().isoformat(),
+                    "previsao": previsao,
+                    "confianca": confianca,
+                    "protecao": protecao,
+                    "ultimo_valor": ultimos[0],
+                    "valores_recentes": ultimos[:10]
+                }
+                
+                historico[jogo].append(registro)
+                if len(historico[jogo]) > HISTORICO_MAXIMO:
+                    historico[jogo].pop(0)
+            
+            # Calcula tempo restante para próxima coleta
+            tempo_processamento = time.time() - inicio
+            tempo_espera = max(0, INTERVALO_COLETA - tempo_processamento)
+            stop_event.wait(tempo_espera)
+            
+        except Exception as e:
+            logger.error(f"Erro na thread {jogo}: {e}", exc_info=True)
+            stop_event.wait(INTERVALO_COLETA)
+    
+    logger.info(f"Thread {jogo} finalizada")
+
+def encerrar_aplicacao(signum, frame):
+    """Manipulador para desligamento gracioso"""
+    logger.info("Recebido sinal de desligamento, finalizando threads...")
+    stop_event.set()
+    sys.exit(0)
+
+# Configuração dos modelos e threads
+for jogo in JOGOS:
+    modelos[jogo] = ModeloPredicao(jogo)
+    Thread(target=tarefa_jogo, args=(jogo,), daemon=True).start()
+
+# Configura handlers de sinal para desligamento gracioso
+signal.signal(signal.SIGINT, encerrar_aplicacao)
+signal.signal(signal.SIGTERM, encerrar_aplicacao)
+
+# Rotas da API
+@app.route("/")
+def home():
+    """Rota principal que serve a interface web"""
+    return render_template("index.html")
+
+@app.route("/api/dados/<jogo>")
+def dados_jogo(jogo):
+    """Endpoint para obter dados atuais de um jogo"""
+    if jogo not in JOGOS:
+        return jsonify({"erro": "Jogo não suportado"}), 404
+    
+    with locks[jogo]:
+        if not dados_atuais[jogo]:
+            return jsonify({"erro": "Dados não disponíveis"}), 503
+        
+        ultimos = dados_atuais[jogo]
+        previsao, confianca, protecao = prever(jogo, ultimos)
+        
+        return jsonify({
+            "jogo": jogo,
+            "previsao": previsao,
+            "confianca": confianca,
+            "protecao": protecao,
+            "ultimo_valor": ultimos[0],
+            "valores_recentes": ultimos[:10],
+            "timestamp": datetime.now().isoformat(),
+            "status": "sucesso"
+        })
+
+@app.route("/api/historico/<jogo>")
+def ver_historico(jogo):
+    """Endpoint para obter histórico de previsões"""
+    if jogo not in JOGOS:
+        return jsonify({"erro": "Jogo não suportado"}), 404
+    
+    with locks[jogo]:
+        return jsonify({
+            "jogo": jogo,
+            "historico": historico.get(jogo, [])[-20:],
+            "status": "sucesso"
+        })
+
+@app.route("/api/jogos")
+def listar_jogos():
+    """Endpoint para listar todos os jogos suportados"""
+    return jsonify({
+        "jogos": JOGOS,
+        "status": "sucesso"
+    })
+
+if __name__ == "__main__":
+    logger.info("Iniciando servidor Flask...")
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        threaded=True
+    )
