@@ -4,7 +4,7 @@ numpy
 pandas
 joblib
 scikit-learn
--e /home/userland/xgboost/python-package
+git+https://github.com/dmlc/xgboost.git#subdirectory=python-package
 gunicorn
 requests
 beautifulsoup4
